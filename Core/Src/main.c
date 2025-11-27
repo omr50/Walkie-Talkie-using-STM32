@@ -21,9 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdlib.h>
 #include <string.h>
 #include "NRF24.h"
 #include "NRF24_reg_addresses.h"
+#include "MCP4725.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,6 +37,7 @@
 /* USER CODE BEGIN PD */
 #define ADC_BUFFER_SIZE 1024
 #define PLD_SIZE 32
+#define Tx 0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,7 +49,11 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+I2C_HandleTypeDef hi2c2;
+
 SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
 
@@ -61,6 +68,8 @@ static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_I2C2_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -75,18 +84,85 @@ uint8_t data_R[PLD_SIZE] = { "Test DATA!!!" };
 //uint8_t ack_R[PLD_SIZE];
 
 uint16_t adc_buffer[ADC_BUFFER_SIZE];
+uint8_t PCM_8bit_Audio_Samples1[ADC_BUFFER_SIZE / 2];
+uint8_t PCM_8bit_Audio_Samples2[ADC_BUFFER_SIZE / 2];
+
+#define AUDIO_BUF_SIZE 1024
+
+volatile uint8_t audio_buf[AUDIO_BUF_SIZE];
+volatile uint16_t write_index = 0;
+volatile uint16_t read_index  = 0;
+volatile uint16_t buffered    = 0;
+
+MCP4725_t mcp4725;
+
+void nrf_packet_received(uint8_t *data)
+{
+    for (int i = 0; i < 32; i++)
+    {
+        audio_buf[write_index] = data[i];
+        write_index = (write_index + 1) % AUDIO_BUF_SIZE;
+
+        if (buffered < AUDIO_BUF_SIZE)
+            buffered++;
+        else
+            read_index = (read_index + 1) % AUDIO_BUF_SIZE;
+    }
+}
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Instance != TIM2 || Tx)
+		return;
+
+    if (buffered > 0)
+    {
+        uint8_t pcm = audio_buf[read_index];
+        read_index = (read_index + 1) % AUDIO_BUF_SIZE;
+        buffered--;
+
+        uint16_t dac_value = pcm << 4;   // expand back to 12-bit
+        MCP4725_SetVoltage(&mcp4725, dac_value, MCP4725_DAC_ONLY);
+    }
+    else
+    {
+        // underrun → silence
+        MCP4725_SetVoltage(&mcp4725, 2048, MCP4725_DAC_ONLY);
+    }
+}
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
+
+	if (!Tx)
+		return;
 	if (hadc->Instance == ADC1) {
-//		HAL_UART_Transmit(&huart2, "DMA interrupt half working\n", 23, 10);
+		HAL_UART_Transmit(&huart2, "DMA interrupt half working\n", 23, 10);
+		// 512 half buffer size
+		for (int i = 0; i < ADC_BUFFER_SIZE / 2; i++) {
+			PCM_8bit_Audio_Samples1[i] = adc_buffer[i] >> 4;
+		}
+
+		HAL_UART_Transmit(&huart2, "DT1\n", 4, 10);
+//		for (int i = 0; i < 16; i++)
+//			nrf24_transmit(PCM_8bit_Audio_Samples1 + 32*i, PLD_SIZE);
+//			nrf24_transmit(data_T, PLD_SIZE);
 	}
+		HAL_UART_Transmit(&huart2, "DT2\n", 4, 10);
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
 
+	if (!Tx)
+		return;
 	if (hadc->Instance == ADC1) {
-//		HAL_UART_Transmit(&huart2, "DMA interrupt full working\n", 23, 10);
-	}
+
+		HAL_UART_Transmit(&huart2, "DMA interrupt full working\n", 23, 10);
+		uint16_t half_buff_size = ADC_BUFFER_SIZE / 2;
+		for (int i = 0; i < half_buff_size; i++) {
+			PCM_8bit_Audio_Samples2[i] = adc_buffer[half_buff_size + i] >> 4;
+		}
+//		for (int i = 0; i < 16; i++)
+//			nrf24_transmit(PCM_8bit_Audio_Samples2 + 32*i, PLD_SIZE);
+		}
 }
 /* USER CODE END 0 */
 
@@ -123,6 +199,19 @@ int main(void)
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_SPI1_Init();
+  MX_I2C2_Init();
+  MX_TIM2_Init();
+  /* USER CODE BEGIN 2 */
+  if (!Tx) {
+	  MCP4725_Initialize(&mcp4725, &hi2c2, 0x62);
+	  HAL_TIM_Base_Start_IT(&htim2);
+  }
+//	  MCP4725_SetVoltage(&mcp4725, 1458, MCP4725_DAC_ONLY);
+//  char msg[32];
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   csn_high();
 
   nrf24_init();
@@ -131,37 +220,39 @@ int main(void)
   nrf24_set_channel(78);
   nrf24_set_crc(en_crc, _1byte);
   nrf24_pipe_pld_size(0, PLD_SIZE);
-  uint8_t addr[5] = {0x10, 0x21, 0x32, 0x43, 0x54};
-
+  uint8_t addr[5] = { 0x10, 0x21, 0x32, 0x43, 0x54 };
   nrf24_open_tx_pipe(addr);
   nrf24_open_rx_pipe(0, addr);
 
+  if (Tx)
+	  nrf24_stop_listen();
+  else
+	  nrf24_listen();
 
-
-  /* USER CODE BEGIN 2 */
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
-  char msg[32];
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+//  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  nrf24_stop_listen();
-	  nrf24_transmit(data_T, sizeof(data_T));
+
 	  HAL_Delay(1);
 //	  sprintf(msg, "%d\r\n", adc_buffer[0]);
-	  nrf24_listen();
-	  if (nrf24_data_available()){
-		  nrf24_receive(data_R, sizeof(data_R));
-		  char tmp[40];
-		  sprintf(tmp, "| %s |\r\n", data_R);
-		  HAL_UART_Transmit(&huart2, tmp, 40, 100);
+	  if (Tx){
+		  nrf24_transmit(data_T, PLD_SIZE);
 	  }
-	  HAL_Delay(1);
+	  else {
+		if (nrf24_data_available()){
+		  nrf24_receive(data_R, sizeof(data_R));
+//		  nrf_packet_received(data_R);
+		  HAL_UART_Transmit(&huart2, data_R, PLD_SIZE, 100);
+//		HAL_UART_Transmit(&huart2, "t4\n", 3, 10);
+		} else {
+		  HAL_UART_Transmit(&huart2, "fail\n", 5, 100);
+		}
+	  }
+
+	  HAL_Delay(3);
   }
   /* USER CODE END 3 */
 }
@@ -186,7 +277,12 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 100;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -196,12 +292,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -228,7 +324,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -260,6 +356,40 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief I2C2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C2_Init(void)
+{
+
+  /* USER CODE BEGIN I2C2_Init 0 */
+
+  /* USER CODE END I2C2_Init 0 */
+
+  /* USER CODE BEGIN I2C2_Init 1 */
+
+  /* USER CODE END I2C2_Init 1 */
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.ClockSpeed = 400000;
+  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C2_Init 2 */
+
+  /* USER CODE END I2C2_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -282,7 +412,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -294,6 +424,51 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 12499;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 1;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
