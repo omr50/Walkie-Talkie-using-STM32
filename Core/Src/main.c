@@ -109,6 +109,7 @@ void nrf_packet_received(uint8_t *data)
             read_index = (read_index + 1) % AUDIO_BUF_SIZE;
     }
 }
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim->Instance != TIM2 || Tx)
@@ -204,7 +205,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   if (!Tx) {
 	  MCP4725_Initialize(&mcp4725, &hi2c2, 0x62);
-	  HAL_TIM_Base_Start_IT(&htim2);
+//	  HAL_TIM_Base_Start_IT(&htim2);
   }
 //	  MCP4725_SetVoltage(&mcp4725, 1458, MCP4725_DAC_ONLY);
 //  char msg[32];
@@ -240,6 +241,7 @@ int main(void)
 //	  sprintf(msg, "%d\r\n", adc_buffer[0]);
 	  if (Tx){
 		  nrf24_transmit(data_T, PLD_SIZE);
+		  HAL_UART_Transmit(&huart2, "transmitted\n", 12, 100);
 	  }
 	  else {
 		if (nrf24_data_available()){
@@ -248,7 +250,7 @@ int main(void)
 		  HAL_UART_Transmit(&huart2, data_R, PLD_SIZE, 100);
 //		HAL_UART_Transmit(&huart2, "t4\n", 3, 10);
 		} else {
-		  HAL_UART_Transmit(&huart2, "fail\n", 5, 100);
+//		  HAL_UART_Transmit(&huart2, "fail\n", 5, 100);
 		}
 	  }
 
