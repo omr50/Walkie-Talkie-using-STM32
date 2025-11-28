@@ -23,9 +23,11 @@
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include "NRF24.h"
 #include "NRF24_reg_addresses.h"
-#include "MCP4725.h"
+//#include "MCP4725.h"
+#include <time.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,9 +37,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_BUFFER_SIZE 1024
+#define ADC_BUFFER_SIZE 64
 #define PLD_SIZE 32
-#define Tx 0
+#define Tx 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,6 +55,7 @@ I2C_HandleTypeDef hi2c2;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
@@ -70,6 +73,7 @@ static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -87,19 +91,24 @@ uint16_t adc_buffer[ADC_BUFFER_SIZE];
 uint8_t PCM_8bit_Audio_Samples1[ADC_BUFFER_SIZE / 2];
 uint8_t PCM_8bit_Audio_Samples2[ADC_BUFFER_SIZE / 2];
 
-#define AUDIO_BUF_SIZE 1024
+#define AUDIO_BUF_SIZE 64
 
 volatile uint8_t audio_buf[AUDIO_BUF_SIZE];
 volatile uint16_t write_index = 0;
 volatile uint16_t read_index  = 0;
 volatile uint16_t buffered    = 0;
+volatile bool new_packet1 = false;
+volatile bool new_packet2 = false;
+volatile bool dac_needs_update = false;
+volatile uint8_t current_pcm = 128;
 
-MCP4725_t mcp4725;
+//MCP4725_t mcp4725;
 
 void nrf_packet_received(uint8_t *data)
 {
     for (int i = 0; i < 32; i++)
     {
+//		HAL_UART_Transmit(&huart2, "t0\n", 3, 10);
         audio_buf[write_index] = data[i];
         write_index = (write_index + 1) % AUDIO_BUF_SIZE;
 
@@ -108,27 +117,38 @@ void nrf_packet_received(uint8_t *data)
         else
             read_index = (read_index + 1) % AUDIO_BUF_SIZE;
     }
+
+//		HAL_UART_Transmit(&huart2, "t1\n", 3, 10);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if (htim->Instance != TIM2 || Tx)
-		return;
+
+    if (htim->Instance != TIM2 || Tx)
+        return;
 
     if (buffered > 0)
     {
-        uint8_t pcm = audio_buf[read_index];
+        current_pcm = audio_buf[read_index];
         read_index = (read_index + 1) % AUDIO_BUF_SIZE;
         buffered--;
-
-        uint16_t dac_value = pcm << 4;   // expand back to 12-bit
-        MCP4725_SetVoltage(&mcp4725, dac_value, MCP4725_DAC_ONLY);
     }
     else
     {
-        // underrun → silence
-        MCP4725_SetVoltage(&mcp4725, 2048, MCP4725_DAC_ONLY);
+        // underrun → silence / mid-level
+        current_pcm = 128;
     }
+
+    dac_needs_update = true;
+    uint16_t pwm_value = ((uint16_t)current_pcm * 1000) / 256;
+    TIM1->CCR4 = pwm_value;
+
+//    static uint8_t t = 0;
+//    t++;
+//    current_pcm = t;  // ramp 0..255 repeatedly
+//
+//    uint16_t pwm_value = ((uint16_t)current_pcm * 1000) / 256;
+//    TIM1->CCR4 = pwm_value;
 }
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
@@ -136,18 +156,17 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc) {
 	if (!Tx)
 		return;
 	if (hadc->Instance == ADC1) {
-		HAL_UART_Transmit(&huart2, "DMA interrupt half working\n", 23, 10);
+//		HAL_UART_Transmit(&huart2, "DMA half\n", 9, 10);
 		// 512 half buffer size
 		for (int i = 0; i < ADC_BUFFER_SIZE / 2; i++) {
 			PCM_8bit_Audio_Samples1[i] = adc_buffer[i] >> 4;
 		}
 
-		HAL_UART_Transmit(&huart2, "DT1\n", 4, 10);
 //		for (int i = 0; i < 16; i++)
 //			nrf24_transmit(PCM_8bit_Audio_Samples1 + 32*i, PLD_SIZE);
 //			nrf24_transmit(data_T, PLD_SIZE);
 	}
-		HAL_UART_Transmit(&huart2, "DT2\n", 4, 10);
+	new_packet1 = true;
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
@@ -156,11 +175,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
 		return;
 	if (hadc->Instance == ADC1) {
 
-		HAL_UART_Transmit(&huart2, "DMA interrupt full working\n", 23, 10);
+//		HAL_UART_Transmit(&huart2, "DMA full\n", 9, 10);
 		uint16_t half_buff_size = ADC_BUFFER_SIZE / 2;
 		for (int i = 0; i < half_buff_size; i++) {
 			PCM_8bit_Audio_Samples2[i] = adc_buffer[half_buff_size + i] >> 4;
 		}
+		new_packet2 = true;
 //		for (int i = 0; i < 16; i++)
 //			nrf24_transmit(PCM_8bit_Audio_Samples2 + 32*i, PLD_SIZE);
 		}
@@ -202,11 +222,9 @@ int main(void)
   MX_SPI1_Init();
   MX_I2C2_Init();
   MX_TIM2_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
-  if (!Tx) {
-	  MCP4725_Initialize(&mcp4725, &hi2c2, 0x62);
-//	  HAL_TIM_Base_Start_IT(&htim2);
-  }
+
 //	  MCP4725_SetVoltage(&mcp4725, 1458, MCP4725_DAC_ONLY);
 //  char msg[32];
   /* USER CODE END 2 */
@@ -217,8 +235,8 @@ int main(void)
 
   nrf24_init();
   nrf24_tx_pwr(_0dbm);
-  nrf24_data_rate(_1mbps);
-  nrf24_set_channel(78);
+  nrf24_data_rate(_2mbps);
+  nrf24_set_channel(2);
   nrf24_set_crc(en_crc, _1byte);
   nrf24_pipe_pld_size(0, PLD_SIZE);
   uint8_t addr[5] = { 0x10, 0x21, 0x32, 0x43, 0x54 };
@@ -230,31 +248,89 @@ int main(void)
   else
 	  nrf24_listen();
 
-//  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
+  if (!Tx) {
+//	  MCP4725_Initialize(&mcp4725, &hi2c2, 0x60);
+
+	  HAL_TIM_Base_Start_IT(&htim2);
+	  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+//	  TIM1->CCR4 = 500;
+//	  HAL_Delay(2000);
+//
+//	  // 100% duty - LED should be bright
+//	  TIM1->CCR4 = 999;
+//	  HAL_Delay(2000);
+//
+//	  // 0% duty - LED should be off
+//	  TIM1->CCR4 = 0;
+//	  HAL_Delay(2000);
+  } else {
+
+	  HAL_TIM_Base_Start_IT(&htim2);
+	  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
+  }
+
+
+  HAL_UART_Transmit(&huart2, "f\n", 3, 10);
+  uint32_t time_now = HAL_GetTick();
+  uint32_t packet_per_sec = 0;
+  uint8_t seq = 0;
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
 
-	  HAL_Delay(1);
+//	  HAL_Delay(1);
 //	  sprintf(msg, "%d\r\n", adc_buffer[0]);
 	  if (Tx){
-		  nrf24_transmit(data_T, PLD_SIZE);
-		  HAL_UART_Transmit(&huart2, "transmitted\n", 12, 100);
+//		  nrf24_transmit(data_T, PLD_SIZE);
+//		  HAL_UART_Transmit(&huart2, "transmitted\n", 12, 100);
+		  if (new_packet1) {
+//			  HAL_UART_Transmit(&huart2, "TX1\n", 4, 10);
+//			  PCM_8bit_Audio_Samples1[0] = seq++;
+			  nrf24_transmit(PCM_8bit_Audio_Samples1, PLD_SIZE);
+			  packet_per_sec++;
+			  new_packet1 = false;
+		  }
+		  if (new_packet2) {
+//			  PCM_8bit_Audio_Samples2[0] = seq++;
+			  nrf24_transmit(PCM_8bit_Audio_Samples2, PLD_SIZE);
+			  packet_per_sec++;
+			  new_packet2 = false;
+		  }
 	  }
 	  else {
-		if (nrf24_data_available()){
+		while (nrf24_data_available()){
+//		HAL_UART_Transmit(&huart2, "p\n", 3, 10);
 		  nrf24_receive(data_R, sizeof(data_R));
-//		  nrf_packet_received(data_R);
-		  HAL_UART_Transmit(&huart2, data_R, PLD_SIZE, 100);
+		  packet_per_sec++;
+		  uint8_t rx_seq = data_R[0];
+		  char dbg[32];
+//		  int len = sprintf(dbg, "seq=%u\n", rx_seq);
+//		  HAL_UART_Transmit(&huart2, (uint8_t*)dbg, len, 20);
+
+//		HAL_UART_Transmit(&huart2, "Received Packet: ", 17, 10);
+//		HAL_UART_Transmit(&huart2, data_R, sizeof(data_R), 10);
+		nrf_packet_received(data_R);
+
+//		HAL_UART_Transmit(&huart2, "t1\n", 3, 10);
+//		HAL_UART_Transmit(&huart2, data_R, PLD_SIZE, 100);
 //		HAL_UART_Transmit(&huart2, "t4\n", 3, 10);
-		} else {
-//		  HAL_UART_Transmit(&huart2, "fail\n", 5, 100);
 		}
 	  }
 
-	  HAL_Delay(3);
+	  if (HAL_GetTick() - time_now >= 1000) {
+			time_now += 1000;
+
+			char buff[32];
+			int len = sprintf(buff, "pps=%lu\r\n", (unsigned long)packet_per_sec);
+			HAL_UART_Transmit(&huart2, (uint8_t*)buff, len, 20);
+
+			packet_per_sec = 0;
+		}
+
+//	  HAL_Delay(3);
   }
   /* USER CODE END 3 */
 }
@@ -329,10 +405,10 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T2_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
   hadc1.Init.DMAContinuousRequests = ENABLE;
@@ -430,6 +506,70 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 0;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 999;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
   * @brief TIM2 Initialization Function
   * @param None
   * @retval None
@@ -448,7 +588,7 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 12499;
+  htim2.Init.Prescaler = 6249;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -462,7 +602,7 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
