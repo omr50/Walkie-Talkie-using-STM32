@@ -78,7 +78,7 @@ static void MX_TIM1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 // Tx = 0 is receiver, Tx = 1 is transmitter
-uint8_t Tx = 0;
+volatile uint8_t Tx = 0;
 char msg[] = "Hello from STM32!\r\n";
 uint8_t data_T[PLD_SIZE] = { "Test DATA!!!" };
 //uint8_t ack_T[PLD_SIZE];
@@ -196,12 +196,28 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         if (now - last_press_time > 200)  // 200 ms debounce period
         {
             last_press_time = now;
-            if (Tx)
-            	Tx = 0;
-            else
+            // switch to receiver
+            if (Tx) {
+			  nrf24_listen();
+//			  HAL_TIM_Base_Start_IT(&htim2);
+//			  HAL_ADC_Stop_DMA(&hadc1);
+			  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+			  Tx = 0;
+			  HAL_UART_Transmit(&huart2, "switch to receiver\n", 21, 10);
+			}
+            // switch to transmitter
+            else {
+            	nrf24_stop_listen();
+//				HAL_TIM_Base_Start_IT(&htim2);
+//            	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+				HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
+
             	Tx = 1;
-        }
+				HAL_UART_Transmit(&huart2, "switch to transmitter\n", 23, 10);
+            }
         // else ignore because it’s too soon
+        }
     }
 }
 /* USER CODE END 0 */
