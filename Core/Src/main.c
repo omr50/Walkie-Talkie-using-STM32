@@ -90,7 +90,7 @@ uint16_t adc_buffer[ADC_BUFFER_SIZE];
 uint8_t PCM_8bit_Audio_Samples1[ADC_BUFFER_SIZE / 2];
 uint8_t PCM_8bit_Audio_Samples2[ADC_BUFFER_SIZE / 2];
 
-#define AUDIO_BUF_SIZE 64
+#define AUDIO_BUF_SIZE 1024
 
 volatile uint8_t audio_buf[AUDIO_BUF_SIZE];
 volatile uint16_t write_index = 0;
