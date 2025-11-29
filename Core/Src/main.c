@@ -186,6 +186,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc) {
 }
 
 volatile uint32_t last_press_time = 0;
+volatile bool TX_change = false;
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
@@ -193,29 +194,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     {
         uint32_t now = HAL_GetTick();
 
-        if (now - last_press_time > 200)  // 200 ms debounce period
+        if (now - last_press_time > 700)  // debounce
         {
             last_press_time = now;
+            TX_change = true;
             // switch to receiver
-            if (Tx) {
-			  nrf24_listen();
-//			  HAL_TIM_Base_Start_IT(&htim2);
-//			  HAL_ADC_Stop_DMA(&hadc1);
-			  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 
-			  Tx = 0;
-			  HAL_UART_Transmit(&huart2, "switch to receiver\n", 21, 10);
-			}
-            // switch to transmitter
-            else {
-            	nrf24_stop_listen();
-//				HAL_TIM_Base_Start_IT(&htim2);
-//            	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
-				HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
-
-            	Tx = 1;
-				HAL_UART_Transmit(&huart2, "switch to transmitter\n", 23, 10);
-            }
         // else ignore because it’s too soon
         }
     }
@@ -317,6 +301,35 @@ int main(void)
 
 //	  HAL_Delay(1);
 //	  sprintf(msg, "%d\r\n", adc_buffer[0]);
+
+
+	  if (TX_change) {
+		  if (Tx) {
+			  nrf24_listen();
+//			  HAL_TIM_Base_Start_IT(&htim2);
+			  HAL_ADC_Stop_DMA(&hadc1);
+			  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+			  Tx = 0;
+			  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, GPIO_PIN_SET);
+			  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, GPIO_PIN_RESET);
+			  HAL_UART_Transmit(&huart2, "switch to receiver\n", 21, 10);
+			}
+            // switch to transmitter
+            else {
+            	nrf24_stop_listen();
+//				HAL_TIM_Base_Start_IT(&htim2);
+            	HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+				HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUFFER_SIZE);
+
+            	Tx = 1;
+
+            	HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, GPIO_PIN_SET);
+            	HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, GPIO_PIN_RESET);
+				HAL_UART_Transmit(&huart2, "switch to transmitter\n", 23, 10);
+            }
+		  TX_change = false;
+	  }
 	  if (Tx){
 //		  nrf24_transmit(data_T, PLD_SIZE);
 //		  HAL_UART_Transmit(&huart2, "transmitted\n", 12, 100);
@@ -675,11 +688,22 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, TX_LED_Pin|RX_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, CE_Pin_Pin|CSN_Pin_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : TX_LED_Pin RX_LED_Pin */
+  GPIO_InitStruct.Pin = TX_LED_Pin|RX_LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Button_Pin */
   GPIO_InitStruct.Pin = Button_Pin;
