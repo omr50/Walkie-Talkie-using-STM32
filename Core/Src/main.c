@@ -1,4 +1,12 @@
 /* USER CODE BEGIN Header */
+// add software resetting if no packets come in
+// add screen for packet num print
+// software audio quality increase
+	// - keep 12 bit sampling, don't reduce to 8
+	// - software removal of buzzing/etc. from PCM before transforming to PWM
+// Software detection of mic not in use (background vs user speaking into it)
+	// - this will assist in allowing me to auto switch from tx and rx without button
+	// - maybe too risky/non-intuitive for use though so best to just use button
 /**
   ******************************************************************************
   * @file           : main.c
@@ -260,6 +268,8 @@ int main(void)
   uint8_t addr[5] = { 0x10, 0x21, 0x32, 0x43, 0x54 };
   nrf24_open_tx_pipe(addr);
   nrf24_open_rx_pipe(0, addr);
+  // test to see if it doubles rate
+  nrf24_auto_ack_all(disable);
 
   if (Tx)
 	  nrf24_stop_listen();
@@ -693,7 +703,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, TX_LED_Pin|RX_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(TX_LED_GPIO_Port, TX_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(RX_LED_GPIO_Port, RX_LED_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, CE_Pin_Pin|CSN_Pin_Pin, GPIO_PIN_RESET);
